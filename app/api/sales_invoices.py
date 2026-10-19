@@ -1,6 +1,7 @@
 
 from decimal import Decimal, ROUND_HALF_UP
 import logging
+from re import search
 logger = logging.getLogger(__name__)
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import text
@@ -71,56 +72,96 @@ def list_sales_invoices(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
+    
     sql = text("""
+    SELECT
+        i.InvoiceID AS invoice_id,
+        i.InvoiceNumber AS invoice_number,
+        i.CustomerID AS customer_id,
+        c.FullName AS customer_name,
+        i.InvoiceDate AS invoice_date,
+        i.DueDate AS due_date,
+        i.InvoiceStatus AS invoice_status,
+
+        COALESCE(
+            t.subtotal,
+            CAST(0 AS DECIMAL(19, 2))
+        ) AS subtotal,
+
+        COALESCE(t.tax_line_count, 0) AS tax_line_count,
+
+        COALESCE(
+            payments.amount_paid,
+            CAST(0 AS DECIMAL(19, 2))
+        ) AS amount_paid,
+
+        COALESCE(
+            t.subtotal,
+            CAST(0 AS DECIMAL(19, 2))
+        ) - COALESCE(
+            payments.amount_paid,
+            CAST(0 AS DECIMAL(19, 2))
+        ) AS outstanding_balance
+
+    FROM dbo.SalesInvoices AS i
+
+    INNER JOIN dbo.Customers AS c
+        ON c.CustomerID = i.CustomerID
+
+    OUTER APPLY (
         SELECT
-            i.InvoiceID AS invoice_id,
-            i.InvoiceNumber AS invoice_number,
-            i.CustomerID AS customer_id,
-            c.FullName AS customer_name,
-            i.InvoiceDate AS invoice_date,
-            i.DueDate AS due_date,
-            i.InvoiceStatus AS invoice_status,
-            COALESCE(t.subtotal, CAST(0 AS DECIMAL(19, 2)))
-                AS subtotal,
-            COALESCE(t.tax_line_count, 0) AS tax_line_count
-        FROM dbo.SalesInvoices AS i
-        INNER JOIN dbo.Customers AS c
-            ON c.CustomerID = i.CustomerID
-        OUTER APPLY (
-            SELECT
-               SUM(
-    ROUND(
-        l.Quantity * l.UnitPrice - l.Discount,
-        2
-    )
-) AS subtotal,
-                SUM(
-                    CASE
-                        WHEN l.TaxRateID IS NOT NULL THEN 1
-                        ELSE 0
-                    END
-                ) AS tax_line_count
-            FROM dbo.SalesInvoiceLines AS l
-            WHERE l.InvoiceID = i.InvoiceID
-        ) AS t
-        WHERE
-            (
-                :search IS NULL
-                OR i.InvoiceNumber LIKE N'%' + :search + N'%'
-                OR c.FullName LIKE N'%' + :search + N'%'
-            )
-            AND (
-                :invoice_status IS NULL
-                OR i.InvoiceStatus = :invoice_status
-            )
-            AND (
-                :customer_id IS NULL
-                OR i.CustomerID = :customer_id
-            )
-        ORDER BY i.InvoiceDate DESC, i.InvoiceID DESC
-        OFFSET :offset ROWS
-        FETCH NEXT :limit ROWS ONLY
-    """)
+            SUM(
+                ROUND(
+                    l.Quantity * l.UnitPrice - l.Discount,
+                    2
+                )
+            ) AS subtotal,
+
+            SUM(
+                CASE
+                    WHEN l.TaxRateID IS NOT NULL THEN 1
+                    ELSE 0
+                END
+            ) AS tax_line_count
+
+        FROM dbo.SalesInvoiceLines AS l
+        WHERE l.InvoiceID = i.InvoiceID
+    ) AS t
+
+    OUTER APPLY (
+        SELECT
+            SUM(pa.AmountApplied) AS amount_paid
+        FROM dbo.PaymentAllocations AS pa
+        WHERE pa.InvoiceID = i.InvoiceID
+          AND EXISTS (
+              SELECT 1
+              FROM dbo.JournalEntries AS je
+              WHERE je.SourceType = 'CustomerPayment'
+                AND je.SourceID = pa.PaymentID
+                AND je.Status = 'Posted'
+          )
+    ) AS payments
+
+    WHERE
+        (
+            :search IS NULL
+            OR i.InvoiceNumber LIKE N'%' + :search + N'%'
+            OR c.FullName LIKE N'%' + :search + N'%'
+        )
+        AND (
+            :invoice_status IS NULL
+            OR i.InvoiceStatus = :invoice_status
+        )
+        AND (
+            :customer_id IS NULL
+            OR i.CustomerID = :customer_id
+        )
+
+    ORDER BY i.InvoiceDate DESC, i.InvoiceID DESC
+    OFFSET :offset ROWS
+    FETCH NEXT :limit ROWS ONLY
+""")
+
 
     try:
         with engine.connect() as connection:
@@ -152,6 +193,14 @@ def list_sales_invoices(
             item["subtotal"] = money(Decimal(str(item["subtotal"])))
             item["tax_total"] = ZERO
             item["invoice_total"] = item["subtotal"]
+
+            item["amount_paid"] = money(
+             Decimal(str(item["amount_paid"]))
+)
+            item["outstanding_balance"] = money(
+                 Decimal(str(item["outstanding_balance"]))
+)
+
             results.append(item)
 
         return results
@@ -997,3 +1046,98 @@ def post_sales_invoice(
             ),
         ) from exc
 
+
+@router.get("/{invoice_id}/balance")
+def get_invoice_balance(invoice_id: int):
+    with engine.connect() as connection:
+        # 1. Retrieve the invoice header.
+        invoice = connection.execute(
+            text("""
+                SELECT
+                    InvoiceID,
+                    InvoiceNumber,
+                    CustomerID,
+                    InvoiceDate,
+                    DueDate,
+                    InvoiceStatus
+                FROM dbo.SalesInvoices
+                WHERE InvoiceID = :invoice_id
+            """),
+            {"invoice_id": invoice_id}
+        ).mappings().first()
+
+        if invoice is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Sales invoice not found."
+            )
+
+        # 2. Calculate the invoice total from its lines.
+        totals = connection.execute(
+            text("""
+                SELECT
+                    COUNT(*) AS LineCount,
+                    SUM(
+                        ROUND(
+                            Quantity * UnitPrice - Discount,
+                            2
+                        )
+                    ) AS InvoiceTotal,
+                    SUM(
+                        CASE
+                            WHEN TaxRateID IS NOT NULL THEN 1
+                            ELSE 0
+                        END
+                    ) AS TaxLineCount
+                FROM dbo.SalesInvoiceLines
+                WHERE InvoiceID = :invoice_id
+            """),
+            {"invoice_id": invoice_id}
+        ).mappings().one()
+
+        if totals["LineCount"] == 0:
+            invoice_total = money(Decimal("0.00"))
+        else:
+            invoice_total = money(
+                Decimal(str(totals["InvoiceTotal"]))
+            )
+
+        if totals["TaxLineCount"] > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Tax calculation is not configured yet."
+            )
+
+        # 3. Calculate the amount allocated from customer payments.
+        amount_paid = connection.execute(
+            text("""
+        SELECT COALESCE(SUM(pa.AmountApplied), 0)
+        FROM dbo.PaymentAllocations AS pa
+        WHERE pa.InvoiceID = :invoice_id
+          AND EXISTS (
+              SELECT 1
+              FROM dbo.JournalEntries AS je
+              WHERE je.SourceType = 'CustomerPayment'
+                AND je.SourceID = pa.PaymentID
+                AND je.Status = 'Posted'
+          )
+    """),
+    {"invoice_id": invoice_id}
+).scalar_one()
+
+        amount_paid = money(Decimal(str(amount_paid)))
+        outstanding = money(invoice_total - amount_paid)
+
+        # 4. Return the invoice balance.
+        return {
+            "invoice_id": invoice["InvoiceID"],
+            "invoice_number": invoice["InvoiceNumber"],
+            "customer_id": invoice["CustomerID"],
+            "invoice_date": invoice["InvoiceDate"],
+            "due_date": invoice["DueDate"],
+            "invoice_status": invoice["InvoiceStatus"],
+            "currency": "KES",
+            "invoice_total": invoice_total,
+            "amount_paid": amount_paid,
+            "outstanding_balance": outstanding
+        }

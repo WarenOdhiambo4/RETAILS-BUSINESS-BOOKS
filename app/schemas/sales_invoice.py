@@ -19,6 +19,7 @@ class SalesInvoiceLineResponse(BaseModel):
     line_subtotal: Decimal
 
 
+
 class SalesInvoiceResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -33,6 +34,9 @@ class SalesInvoiceResponse(BaseModel):
     subtotal: Decimal
     tax_total: Decimal
     invoice_total: Decimal
+    amount_paid: Decimal
+    outstanding_balance: Decimal
+
 
 
 class SalesInvoiceDetailResponse(SalesInvoiceResponse):

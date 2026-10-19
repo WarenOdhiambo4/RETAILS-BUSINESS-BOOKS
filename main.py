@@ -1,13 +1,36 @@
+
 import logging
 from app.api.inventory_balances import router as inventory_balances_router
 from app.api.stock_counts import router as stock_counts_router
+from app.api.warehouse_storage import (
+    router as warehouse_storage_router,
+)
+from app.api import supplier_payments
+from app.api.auth import router as auth_router
+from app.api import supplier_bill_receipt_matches
+from app.api import expenses
 from app.api.sales_invoices import router as sales_invoices_router
+from app.api import customer_payments
+
+from app.api.users import router as users_router
+
+from app.api.admin_sessions import router as admin_sessions_router
+from app.api import purchase_orders
+from app.api import goods_receipts
+from app.api.tax_rates import router as tax_rates_router
+from app.api import supplier_bills
 from app.api.categories import router as categories_router
+from app.api.warehouse_assignments import (
+    router as warehouse_assignments_router,
+)
 from app.api.warehouses import router as warehouses_router
 from app.api.customer import router as customers_router
 from app.api.products import router as products_router
 from app.api.inventory import router as inventory_router
 from app.api.suppliers import router as suppliers_router
+from app.api.inventory_transfers import (
+    router as inventory_transfers_router,
+)
 from fastapi import FastAPI, HTTPException, Path
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -19,15 +42,29 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Kijana Finance",
-    description="Finance application API backed by SQL Server.",
+    title="Sawa Finance",
+    description="Retail Books application API backed by SQL Server.",
     version="1.0.0",
 )
+app.include_router(warehouse_storage_router)
+app.include_router(admin_sessions_router)
+app.include_router(users_router)
+app.include_router(auth_router)
+app.include_router(inventory_transfers_router)
+app.include_router(expenses.router)
+app.include_router(supplier_bill_receipt_matches.router)
+app.include_router(tax_rates_router)
+app.include_router(purchase_orders.router)
+app.include_router(goods_receipts.router)
+app.include_router(supplier_bills.router)
+app.include_router(customer_payments.router)
+app.include_router(supplier_payments.router)
 app.include_router(sales_invoices_router)
 app.include_router(products_router)
 app.include_router(inventory_router)
 app.include_router(customers_router)
 app.include_router(warehouses_router)
+app.include_router(warehouse_assignments_router)
 app.include_router(suppliers_router)
 app.include_router(categories_router)
 app.include_router(stock_counts_router)
